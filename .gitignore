@@ -1,0 +1,27 @@
+# Model weights & Checkpoints
+*.pth
+*.pt
+*.bin
+*.h5
+cod10k_checkpoints/
+kvasir_checkpoints/
+fl_checkpoints/
+
+# Python cache
+__pycache__/
+*.pyc
+*.pyo
+*.pyd
+
+# Jupyter Notebook checkpoints
+.ipynb_checkpoints/
+
+# Environment files
+.env
+
+# Dataset folders
+COD10K-v3/
+Kvasir-SEG/
+kvasir-seg/
+COD10K-v3.zip
+kvasir-seg.zip

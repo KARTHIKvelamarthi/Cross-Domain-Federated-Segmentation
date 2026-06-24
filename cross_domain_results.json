@@ -1,0 +1,56 @@
+{
+  "COD10K-only_COD10K": {
+    "model": "COD10K-only",
+    "domain": "COD10K",
+    "Dice": 0.8248,
+    "IoU": 0.3281,
+    "F-measure": 0.8347,
+    "S-measure": 0.8712,
+    "MAE": 0.0163
+  },
+  "COD10K-only_Kvasir": {
+    "model": "COD10K-only",
+    "domain": "Kvasir",
+    "Dice": 0.1506,
+    "IoU": 0.1194,
+    "F-measure": 0.176,
+    "S-measure": 0.5005,
+    "MAE": 0.1398
+  },
+  "Kvasir-only_COD10K": {
+    "model": "Kvasir-only",
+    "domain": "COD10K",
+    "Dice": 0.2239,
+    "IoU": 0.1347,
+    "F-measure": 0.2509,
+    "S-measure": 0.3676,
+    "MAE": 0.0836
+  },
+  "Kvasir-only_Kvasir": {
+    "model": "Kvasir-only",
+    "domain": "Kvasir",
+    "Dice": 0.895,
+    "IoU": 0.8346,
+    "F-measure": 0.8983,
+    "S-measure": 0.9159,
+    "MAE": 0.0301
+  },
+  "FL Global_COD10K": {
+    "model": "FL Global",
+    "domain": "COD10K",
+    "Dice": 0.8132,
+    "IoU": 0.3233,
+    "F-measure": 0.8226,
+    "S-measure": 0.8628,
+    "MAE": 0.0166
+  },
+  "FL Global_Kvasir": {
+    "model": "FL Global",
+    "domain": "Kvasir",
+    "Dice": 0.8893,
+    "IoU": 0.8204,
+    "F-measure": 0.8958,
+    "S-measure": 0.9105,
+    "MAE": 0.0329
+  }
+}
