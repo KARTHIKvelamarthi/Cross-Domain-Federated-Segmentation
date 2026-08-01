@@ -153,6 +153,8 @@ You can download the pre-trained model weights from Google Drive and place them 
 | **Non-Augmented FL** | `checkpoints/fl_checkpoints_original/global_best.pth` | FedProx global model (unaugmented) | [Google Drive](https://drive.google.com/file/d/1D16CNQQ-W3LZGSSwBf61LM0rnWiyoEeq/view?usp=sharing) |
 | **3x Augmented FL** | `checkpoints/fl_checkpoints_aug_new/global_best.pth` | FedProx global model (3x augmented) | [Google Drive](https://drive.google.com/file/d/1WEzSCPq_m-6hpsM82roJS7dlJS1JbHgf/view?usp=sharing) |
 
+> **Note:** these checkpoints were trained in part on the Kvasir-SEG dataset and are provided for research and educational use only. See NOTICE.md for details.
+
 ---
 
 ## 🚀 Execution & Quick Start
@@ -224,4 +226,6 @@ Due to intensive GPU compute requirements (multi-hour training across baseline m
 
 ## 📜 License
 
-This project is licensed under the MIT License - see the [LICENSE](LICENSE) file for details.
+The source code in this repository is licensed under the MIT License — see the LICENSE file for details.
+
+This license covers the code only. It does NOT cover the COD10K-v3 or Kvasir-SEG datasets (which remain subject to their own original licenses), or the pretrained model checkpoints distributed via the links above (which were trained in part on Kvasir-SEG and are provided for research and educational use only, consistent with that dataset's terms). See NOTICE.md for full details.
