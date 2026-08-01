@@ -4,28 +4,13 @@ Polyp Segmentation Baseline — PVTv2-B2 + Lightweight Decoder
 Trains on Kvasir-SEG only. Same architecture as Kvasir-SEG seg model.
 This is Client 2's standalone baseline for comparison against FL model.
 
-Checkpoint-based: each run trains EPOCHS_PER_RUN epochs and saves to Drive.
-Run again next session to continue.
+LOCAL STRUCTURE:
+  ./
+  ├── Kvasir-SEG/
+  └── checkpoints/kvasir_checkpoints/        ← created automatically
 
-INSTALL:
-  pip install torch torchvision timm pillow numpy
-
-DRIVE STRUCTURE:
-  MyDrive/COD_Project/
-  ├── kvasir-seg.zip
-  └── polyp_checkpoints/        ← created automatically
-
-SETUP (run once at top of Colab notebook):
-  import zipfile, os
-  zip_path = "kvasir-seg.zip"
-  extract_to = "kvasir-seg"
-  if not os.path.exists(extract_to):
-      with zipfile.ZipFile(zip_path, 'r') as z:
-          z.extractall(extract_to)
-      print("Extracted.")
-
-USAGE (run each Colab session):
-  !python train_polyp_baseline.py
+USAGE:
+  python train/kvasir_baseline_train.py
 """
 
 import os
@@ -45,15 +30,13 @@ import timm
 # ─────────────────────────────────────────────────────
 # CONFIG
 # ─────────────────────────────────────────────────────
-# Kvasir-SEG structure after extraction:
-#   kvasir-seg/images/   ← .jpg files
-#   kvasir-seg/masks/    ← .jpg files (same names)
-KVASIR_ROOT    = "Kvasir-SEG"
+PROJECT_ROOT   = Path(__file__).resolve().parent.parent
+KVASIR_ROOT    = str(PROJECT_ROOT / "Kvasir-SEG")
 IMAGE_DIR      = os.path.join(KVASIR_ROOT, "images")
 MASK_DIR       = os.path.join(KVASIR_ROOT, "masks")
 
-DRIVE_CKPT_DIR = "kvasir_checkpoints"
-LOCAL_CKPT_DIR = "kvasir_checkpoints"
+DRIVE_CKPT_DIR = str(PROJECT_ROOT / "checkpoints" / "kvasir_checkpoints")
+LOCAL_CKPT_DIR = DRIVE_CKPT_DIR
 
 TOTAL_EPOCHS   = 50
 BATCH_SIZE     = 6
@@ -61,7 +44,10 @@ LEARNING_RATE  = 1e-4
 BACKBONE_LR    = 1e-5
 IMAGE_SIZE     = 352
 VAL_SPLIT      = 0.1
-# EPOCHS_PER_RUN = 5
+KV_TEST_SPLIT  = 0.1
+KV_SPLIT_SEED  = 42
+KV_SPLIT_FILE  = str(PROJECT_ROOT / "checkpoints" / "fl_checkpoints_original" / "kvasir_split_original.json")
+ALT_SPLIT_FILE = str(PROJECT_ROOT / "checkpoints" / "kvasir_checkpoints" / "kvasir_split_original.json")
 
 DEVICE = "cuda" if torch.cuda.is_available() else "cpu"
 print(f"\nDevice : {DEVICE}")
@@ -106,19 +92,15 @@ STD  = [0.229, 0.224, 0.225]
 def normalize(img: np.ndarray) -> np.ndarray:
     img = img.astype(np.float32) / 255.0
     img = (img - MEAN) / STD
-    return img.transpose(2, 0, 1)   # HWC → CHW
+    return img.transpose(2, 0, 1)
 
 
 def find_mask_path(mask_dir: str, stem: str) -> str:
-    """
-    Kvasir masks use same filename as images.
-    Try .jpg first, then .png as fallback.
-    """
     for ext in [".jpg", ".png"]:
         p = os.path.join(mask_dir, stem + ext)
         if os.path.exists(p):
             return p
-    return os.path.join(mask_dir, stem + ".jpg")  # will fail gracefully
+    return os.path.join(mask_dir, stem + ".jpg")
 
 
 class KvasirDataset(Dataset):
@@ -140,7 +122,6 @@ class KvasirDataset(Dataset):
             img_arr  = np.array(img)
             mask_arr = (np.array(mask) > 128).astype(np.float32)
 
-            # Augmentation
             if self.augment:
                 if np.random.rand() > 0.5:
                     img_arr  = np.fliplr(img_arr).copy()
@@ -151,8 +132,6 @@ class KvasirDataset(Dataset):
 
             img_tensor  = torch.from_numpy(normalize(img_arr)).float()
             mask_tensor = torch.from_numpy(mask_arr).unsqueeze(0).float()
-
-            # edge_tensor = mask_tensor (fallback — no edge maps in Kvasir)
             return img_tensor, mask_tensor, mask_tensor
 
         except Exception as e:
@@ -162,29 +141,75 @@ class KvasirDataset(Dataset):
             return dummy, dummy_mask, dummy_mask
 
 
-def build_records(image_dir: str, mask_dir: str) -> list:
+def build_kvasir_split() -> dict:
+    split_path = KV_SPLIT_FILE if os.path.exists(KV_SPLIT_FILE) else ALT_SPLIT_FILE
+    if os.path.exists(split_path):
+        with open(split_path) as f:
+            split = json.load(f)
+        print(f"Loaded existing Kvasir (original) split — "
+              f"train={len(split['train'])} val={len(split['val'])} "
+              f"test={len(split['test'])} (held out, untouched)")
+        return split
+
+    print("No Kvasir (original) split file found — creating one now (first run only).")
+
+    supported = {".jpg", ".jpeg", ".png"}
+    all_stems = sorted({
+        Path(fname).stem
+        for fname in os.listdir(IMAGE_DIR)
+        if Path(fname).suffix.lower() in supported
+    })
+
+    rng = np.random.RandomState(KV_SPLIT_SEED)
+    rng.shuffle(all_stems)
+
+    n      = len(all_stems)
+    n_test = max(1, int(round(n * KV_TEST_SPLIT)))
+    n_val  = max(1, int(round(n * VAL_SPLIT)))
+
+    test_stems  = all_stems[:n_test]
+    val_stems   = all_stems[n_test:n_test + n_val]
+    train_stems = all_stems[n_test + n_val:]
+
+    split = {"train": train_stems, "val": val_stems, "test": test_stems}
+
+    os.makedirs(os.path.dirname(split_path), exist_ok=True)
+    with open(split_path, "w") as f:
+        json.dump(split, f, indent=2)
+
+    print(f"  Original Kvasir images : {n}")
+    print(f"    train stems : {len(train_stems)}")
+    print(f"    val stems   : {len(val_stems)}")
+    print(f"    test stems  : {len(test_stems)}  (reserved — never loaded here)")
+    print(f"  Split saved to: {split_path}")
+
+    return split
+
+
+def build_kvasir_records(split_key: str, split: dict) -> list:
+    allowed = set(split[split_key])
     records = []
     supported = {".jpg", ".jpeg", ".png"}
-    for fname in sorted(os.listdir(image_dir)):
-        ext = Path(fname).suffix.lower()
-        if ext not in supported:
+    for fname in sorted(os.listdir(IMAGE_DIR)):
+        if Path(fname).suffix.lower() not in supported:
             continue
         stem = Path(fname).stem
+        if stem not in allowed:
+            continue
         records.append({
-            "img":  os.path.join(image_dir, fname),
-            "mask": find_mask_path(mask_dir, stem),
+            "img":  os.path.join(IMAGE_DIR, fname),
+            "mask": find_mask_path(MASK_DIR, stem),
         })
     return records
 
 
 def get_dataloaders():
-    records = build_records(IMAGE_DIR, MASK_DIR)
-    print(f"Total Kvasir images: {len(records)}")
+    split   = build_kvasir_split()
+    train_r = build_kvasir_records("train", split)
+    val_r   = build_kvasir_records("val",   split)
 
-    val_n   = max(1, int(len(records) * VAL_SPLIT))
-    train_r = records[:-val_n]
-    val_r   = records[-val_n:]
-    print(f"Train: {len(train_r)}  Val: {len(val_r)}")
+    print(f"Total Kvasir images: {len(train_r) + len(val_r) + len(split['test'])}")
+    print(f"Train: {len(train_r)}  Val: {len(val_r)}  (Test stems held out: {len(split['test'])})")
 
     train_loader = DataLoader(
         KvasirDataset(train_r, augment=True),
@@ -200,7 +225,7 @@ def get_dataloaders():
 
 
 # ─────────────────────────────────────────────────────
-# MODEL — identical to COD seg model
+# MODEL
 # ─────────────────────────────────────────────────────
 
 class ConvBnRelu(nn.Module):
@@ -216,10 +241,6 @@ class ConvBnRelu(nn.Module):
 
 
 class CamouflageSegNet(nn.Module):
-    """
-    Identical architecture to COD seg model.
-    Same weights can be used as starting point for FL.
-    """
     def __init__(self):
         super().__init__()
         self.encoder = timm.create_model(
@@ -292,14 +313,10 @@ def combined_loss(mask_pred, edge_pred, mask_gt, edge_gt):
 
 
 # ─────────────────────────────────────────────────────
-# METRICS — Dice (standard polyp metric)
+# METRICS
 # ─────────────────────────────────────────────────────
 
 def compute_dice(pred, gt, eps=1e-6):
-    """
-    Dice coefficient — standard polyp segmentation metric.
-    Higher is better. Range [0, 1].
-    """
     pred_bin = (torch.sigmoid(pred) > 0.5).float()
     gt       = gt.float()
     inter    = (pred_bin * gt).sum(dim=(2, 3))
@@ -336,25 +353,8 @@ def load_model(state: dict) -> nn.Module:
     return model
 
 
-# def save_model(model, state, epoch, val_loss, dice, iou, is_best=False):
-#     os.makedirs(DRIVE_CKPT_DIR, exist_ok=True)
-#     payload = {
-#         "model_state": model.state_dict(),
-#         "epoch":       epoch,
-#         "val_loss":    val_loss,
-#         "dice":        dice,
-#         "iou":         iou,
-#     }
-#     torch.save(payload, os.path.join(DRIVE_CKPT_DIR, "latest.pth"))
-#     torch.save(payload, os.path.join(DRIVE_CKPT_DIR, f"epoch_{epoch}.pth"))
-#     if is_best:
-#         torch.save(payload, os.path.join(DRIVE_CKPT_DIR, "best.pth"))
-#         print(f"  ✓ Best model saved (Dice={dice:.4f}  IoU={iou:.4f})")
-
 def save_model(model, state, epoch, val_loss, dice, iou, is_best=False):
-
     os.makedirs(DRIVE_CKPT_DIR, exist_ok=True)
-
     payload = {
         "model_state": model.state_dict(),
         "epoch": epoch,
@@ -362,36 +362,12 @@ def save_model(model, state, epoch, val_loss, dice, iou, is_best=False):
         "dice": dice,
         "iou": iou,
     }
-
-    # Always overwrite latest model
-    torch.save(
-        payload,
-        os.path.join(DRIVE_CKPT_DIR, "latest.pth")
-    )
-
-    # Create a permanent checkpoint every 5 epochs
+    torch.save(payload, os.path.join(DRIVE_CKPT_DIR, "latest.pth"))
     if epoch % 5 == 0:
-        torch.save(
-            payload,
-            os.path.join(
-                DRIVE_CKPT_DIR,
-                f"epoch_{epoch}.pth"
-            )
-        )
-
-    # Save best model
+        torch.save(payload, os.path.join(DRIVE_CKPT_DIR, f"epoch_{epoch}.pth"))
     if is_best:
-        torch.save(
-            payload,
-            os.path.join(
-                DRIVE_CKPT_DIR,
-                "best.pth"
-            )
-        )
-
-        print(
-            f"✓ Best model saved (Dice={dice:.4f} IoU={iou:.4f})"
-        )
+        torch.save(payload, os.path.join(DRIVE_CKPT_DIR, "best.pth"))
+        print(f"✓ Best model saved (Dice={dice:.4f} IoU={iou:.4f})")
 
 
 # ─────────────────────────────────────────────────────
@@ -454,21 +430,12 @@ def validate(model, loader):
     )
 
 
-# ─────────────────────────────────────────────────────
-# MAIN
-# ─────────────────────────────────────────────────────
-
 def main():
     os.makedirs(LOCAL_CKPT_DIR, exist_ok=True)
     os.makedirs(DRIVE_CKPT_DIR, exist_ok=True)
 
-    # Verify dataset exists
     if not os.path.exists(IMAGE_DIR):
         print(f"\nERROR: {IMAGE_DIR} not found.")
-        print("Run this first in your Colab notebook:")
-        print("  import zipfile")
-        print("  with zipfile.ZipFile('kvasir-seg.zip') as z:")
-        print("      z.extractall('kvasir-seg')")
         return
 
     state = load_state()
@@ -479,9 +446,6 @@ def main():
         print(f"Best model    : {DRIVE_CKPT_DIR}/best.pth")
         print(f"Best Dice     : {state['best_dice']:.4f}")
         return
-
-    # start_epoch = last_epoch + 1
-    # end_epoch   = min(last_epoch + EPOCHS_PER_RUN, TOTAL_EPOCHS)
 
     start_epoch = last_epoch + 1
     end_epoch   = TOTAL_EPOCHS
@@ -524,55 +488,18 @@ def main():
         print(f"  IoU        : {iou:.4f}")
         print(f"  Time       : {elapsed/60:.1f} min")
 
-        # if is_best:
-        #     state["best_dice"]     = dice
-        #     state["best_val_loss"] = val_loss
-
-        # save_model(model, state, epoch, val_loss, dice, iou, is_best)
-
-        # state["last_completed_epoch"] = epoch
-        # state["train_loss_history"].append(round(train_loss, 4))
-        # state["val_loss_history"].append(round(val_loss, 4))
-        # state["dice_history"].append(round(dice, 4))
-        # save_state(state)
-
-        # print(f"  ✓ Checkpoint saved (epoch {epoch})")
-
         state["last_completed_epoch"] = epoch
-
         state["train_loss_history"].append(round(train_loss, 4))
         state["val_loss_history"].append(round(val_loss, 4))
         state["dice_history"].append(round(dice, 4))
 
         if epoch % 5 == 0 or epoch == TOTAL_EPOCHS:
-
-            save_model(
-                model,
-                state,
-                epoch,
-                val_loss,
-                dice,
-                iou,
-                is_best
-            )
-
+            save_model(model, state, epoch, val_loss, dice, iou, is_best)
             save_state(state)
-
             print(f"✓ Checkpoint saved (epoch {epoch})")
 
     print(f"\n{'='*55}")
     print(f"  Session complete: epochs {start_epoch}–{end_epoch} done")
-    if end_epoch < TOTAL_EPOCHS:
-        print(f"  Run again next session to continue from epoch {end_epoch + 1}")
-    else:
-        print(f"  ALL {TOTAL_EPOCHS} EPOCHS COMPLETE")
-        print(f"  Best model : {DRIVE_CKPT_DIR}/best.pth")
-        print(f"  Best Dice  : {state['best_dice']:.4f}")
-
-    print(f"\n  Dice history:")
-    for i, d in enumerate(state["dice_history"], 1):
-        bar = "█" * int(d * 30)
-        print(f"    Epoch {i:>2}: {d:.4f} {bar}")
     print(f"{'='*55}\n")
 
 

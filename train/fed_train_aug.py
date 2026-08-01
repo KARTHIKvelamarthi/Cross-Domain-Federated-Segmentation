@@ -1,38 +1,22 @@
 """
-Federated Learning — FedAvg on COD10K + Kvasir-SEG
+Federated Learning — FedAvg on COD10K + Kvasir-SEG (Augmented)
 ====================================================
 Client 1 : COD10K   (camouflaged object detection)
-Client 2 : Kvasir   (polyp segmentation)
+Client 2 : Kvasir   (polyp segmentation, augmented 3x)
 Server   : FedAvg aggregation
 
-Checkpoint-based: each run trains ROUNDS_PER_RUN FL rounds and saves to Drive.
-Run again next session to continue.
-
-DRIVE STRUCTURE:
-  MyDrive/COD_Project/
-  ├── COD10K-v3.zip
-  ├── kvasir-seg.zip
-  └── fl_checkpoints/           ← created automatically
+LOCAL STRUCTURE:
+  ./
+  ├── COD10K-v3/
+  ├── Kvasir-SEG-aug/                         ← 3x augmented Kvasir dataset
+  └── checkpoints/fl_checkpoints_aug_new/     ← created automatically
       ├── fl_state.json
-      ├── global_latest.pth     ← global model after each round
-      ├── global_best.pth       ← best global model
-      └── global_round_N.pth    ← per-round snapshots
+      ├── kvasir_split.json                   ← persisted Kvasir train/val/test split
+      ├── global_latest.pth
+      └── global_best.pth
 
-SETUP (run once at top of Colab notebook):
-  import zipfile, os
-
-  if not os.path.exists("COD10K-v3"):
-      with zipfile.ZipFile("COD10K-v3.zip") as z:
-          z.extractall(".")
-      print("COD10K extracted.")
-
-  if not os.path.exists("kvasir-seg"):
-      with zipfile.ZipFile("kvasir-seg.zip") as z:
-          z.extractall("kvasir-seg")
-      print("Kvasir extracted.")
-
-USAGE (run each Colab session):
-  !python train_federated.py
+USAGE:
+  python train/fed_train_aug.py
 """
 
 import os
@@ -53,24 +37,27 @@ import timm
 # ─────────────────────────────────────────────────────
 # CONFIG
 # ─────────────────────────────────────────────────────
+PROJECT_ROOT   = Path(__file__).resolve().parent.parent
 
 # Client 1 — COD10K
-COD_IMAGE_DIR = "COD10K-v3/Train/Image"
-COD_MASK_DIR  = "COD10K-v3/Train/GT_Object"
-COD_EDGE_DIR  = "COD10K-v3/Train/GT_Edge"
-COD_TEST_IMG  = "COD10K-v3/Test/Image"
-COD_TEST_MASK = "COD10K-v3/Test/GT_Object"
+COD_IMAGE_DIR  = str(PROJECT_ROOT / "COD10K-v3" / "Train" / "Image")
+COD_MASK_DIR   = str(PROJECT_ROOT / "COD10K-v3" / "Train" / "GT_Object")
+COD_EDGE_DIR   = str(PROJECT_ROOT / "COD10K-v3" / "Train" / "GT_Edge")
+COD_TEST_IMG   = str(PROJECT_ROOT / "COD10K-v3" / "Test" / "Image")
+COD_TEST_MASK  = str(PROJECT_ROOT / "COD10K-v3" / "Test" / "GT_Object")
 
-# Client 2 — Kvasir-SEG
-KVASIR_ROOT   = "Kvasir-SEG"
-KV_IMAGE_DIR  = os.path.join(KVASIR_ROOT, "images")
-KV_MASK_DIR   = os.path.join(KVASIR_ROOT, "masks")
+# Client 2 — Kvasir-SEG (3x augmented dataset)
+KVASIR_ROOT    = str(PROJECT_ROOT / "Kvasir-SEG-aug")
+KV_IMAGE_DIR   = os.path.join(KVASIR_ROOT, "images")
+KV_MASK_DIR    = os.path.join(KVASIR_ROOT, "masks")
 
-DRIVE_CKPT_DIR = "fl_checkpoints"
+KV_AUG_SUFFIXES = ("_hflip", "_rotate", "_colour")
 
-# FL hyperparameters
+DRIVE_CKPT_DIR = str(PROJECT_ROOT / "checkpoints" / "fl_checkpoints_aug_new")
+KV_SPLIT_FILE  = os.path.join(DRIVE_CKPT_DIR, "kvasir_split.json")
+
 TOTAL_ROUNDS    = 50    # total FL communication rounds
-ROUNDS_PER_RUN  = 5     # rounds per Colab session
+ROUNDS_PER_RUN  = 5     # rounds per session
 LOCAL_EPOCHS    = 1     # each client trains for this many epochs per round
 BATCH_SIZE      = 6
 LEARNING_RATE   = 1e-4
@@ -78,9 +65,10 @@ BACKBONE_LR     = 1e-5
 IMAGE_SIZE      = 352
 VAL_SPLIT       = 0.1
 
-# FedAvg weights — equal weighting between clients
-# Adjust if dataset sizes are very different
-CLIENT_WEIGHTS  = [0.75, 0.25]   # [COD10K weight, Kvasir weight]
+KV_TEST_SPLIT   = 0.1
+KV_SPLIT_SEED   = 42
+
+CLIENT_WEIGHTS  = [0.70, 0.30]   # [COD10K weight, Kvasir weight]
 MU = 0.01
 
 DEVICE = "cuda" if torch.cuda.is_available() else "cpu"
@@ -105,7 +93,6 @@ def load_state() -> dict:
     return {
         "last_completed_round":  0,
         "best_avg_dice":         0.0,
-        # per-round metrics
         "cod_dice_history":      [],
         "kvasir_dice_history":   [],
         "cod_iou_history":       [],
@@ -239,13 +226,76 @@ def build_cod_records():
     return records
 
 
-def build_kvasir_records():
+# ─────────────────────────────────────────────────────
+# KVASIR SPLIT — stem-grouped, persisted, test held out
+# ─────────────────────────────────────────────────────
+
+def get_base_stem(stem: str) -> str:
+    for suf in KV_AUG_SUFFIXES:
+        if stem.endswith(suf):
+            return stem[: -len(suf)]
+    return stem
+
+
+def build_kvasir_split() -> dict:
+    if os.path.exists(KV_SPLIT_FILE):
+        with open(KV_SPLIT_FILE) as f:
+            split = json.load(f)
+        print(f"Loaded existing Kvasir split — "
+              f"train={len(split['train'])} val={len(split['val'])} "
+              f"test={len(split['test'])} (held out, untouched)")
+        return split
+
+    print("No Kvasir split file found — creating one now (first run only).")
+
+    all_stems = set()
+    supported = {".jpg", ".jpeg", ".png"}
+    for fname in os.listdir(KV_IMAGE_DIR):
+        if Path(fname).suffix.lower() not in supported:
+            continue
+        all_stems.add(get_base_stem(Path(fname).stem))
+
+    base_stems = sorted(all_stems)
+    rng = np.random.RandomState(KV_SPLIT_SEED)
+    rng.shuffle(base_stems)
+
+    n      = len(base_stems)
+    n_test = max(1, int(round(n * KV_TEST_SPLIT)))
+    n_val  = max(1, int(round(n * VAL_SPLIT)))
+
+    test_stems  = base_stems[:n_test]
+    val_stems   = base_stems[n_test:n_test + n_val]
+    train_stems = base_stems[n_test + n_val:]
+
+    split = {"train": train_stems, "val": val_stems, "test": test_stems}
+
+    os.makedirs(DRIVE_CKPT_DIR, exist_ok=True)
+    with open(KV_SPLIT_FILE, "w") as f:
+        json.dump(split, f, indent=2)
+
+    print(f"  Original Kvasir images : {n}")
+    print(f"    train stems : {len(train_stems)}")
+    print(f"    val stems   : {len(val_stems)}")
+    print(f"    test stems  : {len(test_stems)}  (reserved — never loaded here)")
+    print(f"  Split saved to: {KV_SPLIT_FILE}")
+
+    return split
+
+
+def build_kvasir_records(split_key: str, split: dict) -> list:
+    assert split_key in ("train", "val"), \
+        "build_kvasir_records is only ever called with 'train' or 'val' " \
+        "in this script — Kvasir test images stay untouched."
+
+    allowed = set(split[split_key])
     records = []
     supported = {".jpg", ".jpeg", ".png"}
     for fname in sorted(os.listdir(KV_IMAGE_DIR)):
         if Path(fname).suffix.lower() not in supported:
             continue
         stem = Path(fname).stem
+        if get_base_stem(stem) not in allowed:
+            continue
         records.append({
             "img":  os.path.join(KV_IMAGE_DIR, fname),
             "mask": find_mask_path(KV_MASK_DIR, stem),
@@ -254,24 +304,18 @@ def build_kvasir_records():
 
 
 def get_client_loaders():
-    """
-    Returns train/val loaders for both clients.
-    Also returns test loaders for evaluation.
-    """
-    # Client 1 — COD10K
     cod_records = build_cod_records()
     cod_val_n   = max(1, int(len(cod_records) * VAL_SPLIT))
     cod_train   = cod_records[:-cod_val_n]
     cod_val     = cod_records[-cod_val_n:]
 
-    # Client 2 — Kvasir
-    kv_records  = build_kvasir_records()
-    kv_val_n    = max(1, int(len(kv_records) * VAL_SPLIT))
-    kv_train    = kv_records[:-kv_val_n]
-    kv_val      = kv_records[-kv_val_n:]
+    kv_split = build_kvasir_split()
+    kv_train = build_kvasir_records("train", kv_split)
+    kv_val   = build_kvasir_records("val",   kv_split)
 
     print(f"Client 1 (COD10K)  — Train: {len(cod_train)}  Val: {len(cod_val)}")
-    print(f"Client 2 (Kvasir)  — Train: {len(kv_train)}  Val: {len(kv_val)}")
+    print(f"Client 2 (Kvasir)  — Train: {len(kv_train)}  Val: {len(kv_val)}  "
+          f"(test stems reserved, not loaded)")
 
     c1_train = DataLoader(CODDataset(cod_train, augment=True),
                           batch_size=BATCH_SIZE, shuffle=True,
@@ -289,7 +333,7 @@ def get_client_loaders():
 
 
 # ─────────────────────────────────────────────────────
-# MODEL — identical to both baselines
+# MODEL
 # ─────────────────────────────────────────────────────
 
 class ConvBnRelu(nn.Module):
@@ -386,27 +430,15 @@ def compute_iou(pred, gt, eps=1e-6):
 
 
 # ─────────────────────────────────────────────────────
-# FEDAVG — core aggregation
+# FEDAVG
 # ─────────────────────────────────────────────────────
 
 def fedavg(global_weights: dict, client_weights_list: list, weights: list) -> dict:
-    """
-    FedAvg: weighted average of client model parameters.
-
-    Args:
-        global_weights      : current global model state_dict (unused here, kept for reference)
-        client_weights_list : list of state_dicts from each client
-        weights             : list of floats summing to 1.0 — client contribution weights
-
-    Returns:
-        averaged state_dict
-    """
     assert abs(sum(weights) - 1.0) < 1e-5, "Client weights must sum to 1.0"
     assert len(client_weights_list) == len(weights)
 
     averaged = {}
     for key in client_weights_list[0].keys():
-        # Weighted sum across clients
         averaged[key] = sum(
             w * client_w[key].float()
             for w, client_w in zip(weights, client_weights_list)
@@ -420,11 +452,6 @@ def fedavg(global_weights: dict, client_weights_list: list, weights: list) -> di
 
 def client_train(global_model: nn.Module, train_loader: DataLoader,
                  client_name: str, round_num: int) -> tuple:
-    """
-    Each client receives a copy of the global model,
-    trains locally for LOCAL_EPOCHS, returns updated weights + loss.
-    """
-    # Deep copy — client trains its own local copy
     local_model = copy.deepcopy(global_model).to(DEVICE)
     local_model.train()
 
@@ -460,27 +487,17 @@ def client_train(global_model: nn.Module, train_loader: DataLoader,
                 edge
             )
 
-            prox_term = torch.tensor(
-                0.0,
-                device=DEVICE
-            )
+            prox_term = torch.tensor(0.0, device=DEVICE)
 
             for name, param in local_model.named_parameters():
-
                 if "encoder" not in name:
-
-                    prox_term += torch.sum(
-                        (param - global_params[name]) ** 2
-                    )
+                    prox_term += torch.sum((param - global_params[name]) ** 2)
 
             loss = loss + (MU / 2.0) * prox_term
 
             optimizer.zero_grad()
             loss.backward()
-            torch.nn.utils.clip_grad_norm_(
-                local_model.parameters(),
-                1.0
-            )
+            torch.nn.utils.clip_grad_norm_(local_model.parameters(), 1.0)
             optimizer.step()
 
             total_loss += loss.item()
@@ -494,7 +511,6 @@ def client_train(global_model: nn.Module, train_loader: DataLoader,
     avg_loss = total_loss / max(steps, 1)
     print(f"    [{client_name}] Avg loss: {avg_loss:.4f}")
 
-    # Return local weights and loss
     return local_model.state_dict(), avg_loss
 
 
@@ -505,7 +521,6 @@ def client_train(global_model: nn.Module, train_loader: DataLoader,
 @torch.no_grad()
 def evaluate_global(global_model: nn.Module, val_loader: DataLoader,
                     client_name: str) -> tuple:
-    """Evaluate global model on a client's validation set."""
     global_model.eval()
     total_dice = 0.0
     total_iou  = 0.0
@@ -570,11 +585,9 @@ def save_global_model(model, state, round_num, cod_dice, kv_dice, is_best=False)
 def main():
     os.makedirs(DRIVE_CKPT_DIR, exist_ok=True)
 
-    # Verify datasets
-    for path, name in [(COD_IMAGE_DIR, "COD10K"), (KV_IMAGE_DIR, "Kvasir-SEG")]:
+    for path, name in [(COD_IMAGE_DIR, "COD10K"), (KV_IMAGE_DIR, "Kvasir-SEG (augmented)")]:
         if not os.path.exists(path):
             print(f"\nERROR: {name} not found at {path}")
-            print("Run the setup cell at the top of your Colab notebook.")
             return
 
     state      = load_state()
@@ -590,30 +603,23 @@ def main():
     end_round   = min(last_round + ROUNDS_PER_RUN, TOTAL_ROUNDS)
 
     print(f"\n{'='*60}")
-    print(f"  Federated Learning — FedProx")
+    print(f"  Federated Learning — FedProx (Augmented Kvasir)")
     print(f"  Clients  : COD10K (Client 1) + Kvasir-SEG (Client 2)")
     print(f"  Weights  : {CLIENT_WEIGHTS}")
     print(f"  This session : rounds {start_round} → {end_round}")
     print(f"  Total target : {TOTAL_ROUNDS} rounds")
     print(f"{'='*60}\n")
 
-    # Load data loaders for both clients
     (c1_train, c1_val), (c2_train, c2_val) = get_client_loaders()
 
-    # Load / initialise global model
     global_model = load_global_model(state)
 
-    # ── FL rounds ──────────────────────────────────────
     for round_num in range(start_round, end_round + 1):
         print(f"\n{'─'*60}")
         print(f"  FL Round {round_num}/{TOTAL_ROUNDS}")
         print(f"{'─'*60}")
         t0 = time.time()
 
-        # ── Step 1: broadcast global model to clients ──
-        # (in simulation this is just passing the model reference)
-
-        # ── Step 2: client local training ──────────────
         print(f"\n  [Client 1 — COD10K training]")
         c1_weights, c1_loss = client_train(
             global_model, c1_train, "COD10K", round_num)
@@ -622,7 +628,6 @@ def main():
         c2_weights, c2_loss = client_train(
             global_model, c2_train, "Kvasir", round_num)
 
-        # ── Step 3: FedAvg aggregation ─────────────────
         print(f"\n  [Server — FedAvg aggregation (FedProx clients)]")
         averaged_weights = fedavg(
             global_model.state_dict(),
@@ -632,7 +637,6 @@ def main():
         global_model.load_state_dict(averaged_weights)
         print(f"  Aggregation complete.")
 
-        # ── Step 4: evaluate global model ──────────────
         print(f"\n  [Evaluation — global model on both domains]")
         cod_dice, cod_iou   = evaluate_global(global_model, c1_val,  "COD10K")
         kv_dice,  kv_iou    = evaluate_global(global_model, c2_val,  "Kvasir")
@@ -654,7 +658,6 @@ def main():
 
         save_global_model(global_model, state, round_num, cod_dice, kv_dice, is_best)
 
-        # Update state
         state["last_completed_round"] = round_num
         state["cod_dice_history"].append(round(cod_dice, 4))
         state["kvasir_dice_history"].append(round(kv_dice, 4))
@@ -667,22 +670,8 @@ def main():
 
         print(f"  ✓ Checkpoint saved (round {round_num})")
 
-    # ── Session summary ─────────────────────────────────
     print(f"\n{'='*60}")
     print(f"  Session complete: rounds {start_round}–{end_round} done")
-
-    if end_round < TOTAL_ROUNDS:
-        print(f"  Run again next session to continue from round {end_round + 1}")
-    else:
-        print(f"  ALL {TOTAL_ROUNDS} ROUNDS COMPLETE")
-        print(f"  Best global model : {DRIVE_CKPT_DIR}/global_best.pth")
-        print(f"  Best avg Dice     : {state['best_avg_dice']:.4f}")
-
-    print(f"\n  Avg Dice per round:")
-    for i, d in enumerate(state["avg_dice_history"], 1):
-        cod = state["cod_dice_history"][i-1]
-        kv  = state["kvasir_dice_history"][i-1]
-        print(f"    Round {i:>2}: avg={d:.4f}  cod={cod:.4f}  kvasir={kv:.4f}")
     print(f"{'='*60}\n")
 
 

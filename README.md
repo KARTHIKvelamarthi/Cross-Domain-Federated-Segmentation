@@ -1,130 +1,227 @@
-# Cross-Domain Federated Segmentation
+# Cross-Domain Federated Learning for Camouflaged Object & Polyp Segmentation
 
-A federated learning framework using FedProx and Pyramid Vision Transformer (PVTv2) backbones to train robust joint segmentation models across medical imaging and camouflaged object detection domains without performance degradation or data sharing.
+[![Python 3.10+](https://img.shields.io/badge/Python-3.10%2B-blue.svg)](https://www.python.org/)
+[![PyTorch 2.0+](https://img.shields.io/badge/PyTorch-2.0%2B-ee4c2c.svg)](https://pytorch.org/)
+[![License: MIT](https://img.shields.io/badge/License-MIT-yellow.svg)](LICENSE)
 
-## Problem Statement
+An end-to-end Federated Learning framework investigating cross-domain generalizability, non-IID domain shift, and privacy-preserving collaborative learning between two distinct visual segmentation domains: **Camouflaged Object Detection (COD10K)** and **Endoscopic Polyp Segmentation (Kvasir-SEG)** using Pyramid Vision Transformer v2 (PVTv2-B2).
 
-Deep learning models for semantic segmentation suffer from catastrophic generalization failure when deployed on out-of-distribution domains. For instance, a model trained solely on medical polyps fails on camouflaged objects, and vice versa. Standard Federated Learning (FedAvg) also struggles to converge when clients possess highly heterogeneous features and labels. This project uses federated learning to build a unified segmentation model that generalizes across medical and camouflage domains while preserving data privacy.
+---
 
-## Architecture Overview
+## 📌 Project Overview & Research Objectives
 
-- **Model Backbone**: `CamouflageSegNet` utilizing a Pyramid Vision Transformer (`pvt_v2_b2`) encoder pretrained on ImageNet.
-- **Decoder Architecture**: A lightweight custom decoder with convolutional bottleneck layers, lateral feature interpolation/concatenation, and dual prediction heads for segmentation and boundary edge map extraction.
-- **Federated Algorithm**: `FedProx` framework featuring client-side regularization with a proximal term ($\mu = 0.01$) to stabilize aggregation.
-- **Training Flow**: 
-  1. The server broadcasts the global `CamouflageSegNet` weights to two client nodes.
-  2. **Client 1 (COD10K)**: Trains locally on camouflage images using segment and edge loss.
-  3. **Client 2 (Kvasir-SEG)**: Trains locally on polyp images using segment and edge loss.
-  4. The server aggregates model parameters via weighted average (FedAvg weight parameters: 0.75 for Client 1 and 0.25 for Client 2).
+Standard deep learning segmentation models perform exceptionally well within their training domain but frequently fail when deployed on unseen data distributions (*domain shift*). In medical and sensitive visual domains, aggregating raw patient data onto a central server is restricted by privacy regulations (e.g., HIPAA, GDPR).
 
-## Datasets Used
+### Core Goals:
+1. **Cross-Domain Evaluation**: Quantify the cross-domain performance collapse when single-domain baseline models (COD10K-only, Kvasir-only) are evaluated on out-of-domain test sets.
+2. **Federated Collaboration**: Train a unified global model using **FedAvg / FedProx** across two highly non-IID client nodes without sharing raw images.
+3. **Impact of Domain Augmentation**: Evaluate how medically justified data augmentations on data-scarce medical clients (Kvasir-SEG) affect federated convergence and cross-domain generalizability.
 
-- **COD10K-v3**: A large-scale Camouflaged Object Detection dataset comprising 3,040 training and test images annotated with semantic masks and edge maps.
-- **Kvasir-SEG**: A medical polyp segmentation dataset containing 1,000 gastrointestinal images and corresponding ground-truth masks.
+---
 
-### Citations
+## 💡 Models & Datasets
 
-If you use these datasets, please cite their original papers:
+### 🏗️ Model Architecture: `CamouflageSegNet`
+- **Encoder Backbone**: **PVTv2-B2 (Pyramid Vision Transformer v2)** pretrained on ImageNet for hierarchical multi-scale feature extraction.
+- **Decoder**: Feature Pyramid Network (FPN)-style multi-scale fusion decoder.
+- **Dual Heads**: 
+  1. *Segmentation Head*: Outputs primary binary segmentation mask logits.
+  2. *Edge Head*: Supervised boundary edge detection head to enforce sharp object contours.
+- **Loss Function**: Combined Binary Cross-Entropy (BCE) + Intersection-over-Union (IoU) Loss with auxiliary boundary loss:
+  $$\mathcal{L}_{\text{total}} = \mathcal{L}_{\text{BCE+IoU}}(\hat{Y}_{\text{seg}}, Y_{\text{seg}}) + 0.5 \cdot \mathcal{L}_{\text{BCE+IoU}}(\hat{Y}_{\text{edge}}, Y_{\text{edge}})$$
 
-**COD10K**:
-```bibtex
-@inproceedings{fan2020camouflaged,
-  title={Camouflaged object detection},
-  author={Fan, Deng-Ping and Ji, Ge-Peng and Sun, Guolei and Cheng, Ming-Ming and Shen, Jianbing and Shao, Ling},
-  booktitle={Proceedings of the IEEE/CVF Conference on Computer Vision and Pattern Recognition (CVPR)},
-  pages={2777--2787},
-  year={2020}
-}
+### 📊 Datasets & Client Nodes
+| Client | Domain | Dataset | Training Size | Test Size | Characteristics |
+| :--- | :--- | :--- | :--- | :--- | :--- |
+| **Client 1** | Natural / Camouflaged | **COD10K-v3** | 4,000 images | 2,026 images | High intra-class variation, subtle visual boundaries |
+| **Client 2** | Medical / Endoscopy | **Kvasir-SEG** | 800 images | 100 images | High specular reflections, variable mucosal backgrounds |
+| **Client 2 (Aug)** | Medical / Endoscopy | **Kvasir-SEG-aug** | 2,400 images | 100 images | Expanded via Horizontal Flip, Random Rotation (±20°), Color Jitter |
+
+---
+
+## 🛠️ Methodology & System Architecture
+
+```mermaid
+flowchart TD
+    subgraph Client1 ["Client 1: Natural Domain (COD10K)"]
+        D1["COD10K Dataset<br/>(4,000 Train Images)"] --> M1["Local Model 1<br/>(PVTv2-B2 + Decoder)"]
+    end
+
+    subgraph Client2 ["Client 2: Medical Domain (Kvasir-SEG)"]
+        D2["Kvasir-SEG Dataset<br/>(3x Medically Augmented)"] --> M2["Local Model 2<br/>(PVTv2-B2 + Decoder)"]
+    end
+
+    M1 -- "Send Local Weights (W₁)" --> Server["FedAvg / FedProx Aggregator<br/>W_global = Σ (w_k * W_k)"]
+    M2 -- "Send Local Weights (W₂)" --> Server
+
+    Server -- "Broadcast Global Weights (W_global)" --> M1
+    Server -- "Broadcast Global Weights (W_global)" --> M2
+
+    Server --> Eval["Cross-Domain Evaluator"]
+    Eval --> T1["COD10K Test Set<br/>(2,026 images)"]
+    Eval --> T2["Kvasir Reserved Test Set<br/>(100 original stems)"]
 ```
 
-**Kvasir-SEG**:
-```bibtex
-@inproceedings{jha2020kvasir,
-  title={Kvasir-seg: A segmented polyp dataset and baseline for medical image segmentation},
-  author={Jha, Debesh and Smedsrud, Pia H and Riegler, Michael A and Halvorsen, P{\aa}l and de Lange, Thomas and Johansen, Dag and Johansen, H{\aa}vard D},
-  booktitle={International Conference on MultiMedia Modeling (MMM)},
-  pages={451--462},
-  year={2020},
-  organization={Springer}
-}
+### 🔒 Stem-Grouped Split Protection (Zero Data Leakage)
+To ensure data augmented variants (`_hflip`, `_rotate`, `_colour`) never leak into the validation or test sets, Kvasir data splits are stem-grouped and persisted in JSON manifest files (`kvasir_split.json`). Reserved test stems are strictly excluded from all training and augmentation routines.
+
+---
+
+## 📂 Project Structure
+
+```
+fed/
+├── train/                                    # Training & Dataset Processing Scripts
+│   ├── augment_kvasir.py                     # Generates 3x augmented Kvasir dataset
+│   ├── cod10k_baseline_train.py              # Standalone COD10K baseline trainer
+│   ├── kvasir_baseline_train.py              # Standalone Kvasir baseline trainer
+│   ├── fed_train_non-aug.py                  # Federated training (Non-augmented Kvasir)
+│   └── fed_train_aug.py                      # Federated training (3x Augmented Kvasir)
+│
+├── compare/                                  # Evaluation & Inference Scripts
+│   ├── compare_baselines.py                  # Evaluates baseline checkpoints live
+│   ├── compare_non-aug.py                    # Evaluates Non-Augmented FL Global model
+│   ├── compare_fl_aug.py                     # Evaluates 3x Augmented FL Global model
+│   └── predict_single_image.py               # Single-image inference overlay & heatmap side-by-side
+│
+├── checkpoints/                              # Model Checkpoints & Data Split Manifests
+│   ├── cod10k_checkpoints/
+│   │   └── best.pth                          # Standalone COD10K baseline weights
+│   ├── kvasir_checkpoints/
+│   │   └── best.pth                          # Standalone Kvasir baseline weights
+│   ├── fl_checkpoints_original/
+│   │   ├── global_best.pth                   # Non-augmented FL global model weights
+│   │   └── kvasir_split_original.json        # Data split manifest (non-augmented)
+│   └── fl_checkpoints_aug_new/
+│       ├── global_best.pth                   # 3x Augmented FL global model weights
+│       └── kvasir_split.json                 # Data split manifest (augmented)
+│
+├── results/                                  # Structured JSON Evaluation Outputs
+│   ├── baseline_results.json                 # Baseline cross-domain metrics
+│   ├── cross_domain_results_non_aug.json     # Non-augmented FL vs baseline comparison
+│   └── cross_domain_results_fl_aug.json      # 3x Augmented FL vs baseline comparison
+│
+├── COD10K-v3/                                # COD10K-v3 Raw Dataset Directory
+├── Kvasir-SEG/                               # Kvasir-SEG Raw Dataset Directory
+├── Kvasir-SEG-aug/                           # Kvasir 3x Augmented Dataset Directory
+├── requirements.txt                          # Python dependencies with annotations
+└── README.md                                 # Project documentation
 ```
 
-## Dataset Setup
+---
 
-Download the datasets and place their zip archives directly into the project root directory:
+## 📥 Dataset Download & Setup Guide
 
-1. **COD10K-v3**: Download `COD10K-v3.zip` and place it in the root folder. The training scripts automatically extract this to `./COD10K-v3/` if the folder does not exist.
-2. **Kvasir-SEG**: Download `kvasir-seg.zip` and place it in the root folder. The training scripts automatically extract this to `./Kvasir-SEG/` if the folder does not exist.
+### 1. Download Datasets
+- **COD10K-v3**: Download from the official [COD10K Repository / Project Page](https://github.com/DengPingFan/COD10K).
+- **Kvasir-SEG**: Download from the official [SimulaMet Kvasir-SEG Page](https://kvasir.simula.no/kvasir-seg/).
 
-Ensure your root directory structure is laid out as follows:
-```text
-.
+### 2. Place Datasets in Project Root
+Extract the zip archives into the root directory of this repository with the exact following paths:
+
+```
+root/
 ├── COD10K-v3/
 │   ├── Train/
 │   │   ├── Image/
-│   │   └── GT_Object/
+│   │   ├── GT_Object/
+│   │   └── GT_Edge/
 │   └── Test/
 │       ├── Image/
 │       └── GT_Object/
-├── Kvasir-SEG/
-│   ├── images/
-│   └── masks/
-├── COD10K-v3.zip (optional)
-├── kvasir-seg.zip (optional)
-├── compare.py
-├── fed_model_train.py
-└── ...
+└── Kvasir-SEG/
+    ├── images/
+    └── masks/
 ```
 
-## Results Table
+### 3. Generate Augmented Medical Dataset (Optional)
+Run the augmentation script to expand Kvasir images to 3x before augmented FL training:
+```bash
+python train/augment_kvasir.py
+```
 
-Evaluation results on the respective test splits show that single-domain baselines fail catastrophically cross-domain, whereas the FL Global model maintains high, generalized performance across both:
+---
 
-| Model | COD10K Test (Dice) | Kvasir Test (Dice) |
-| :--- | :---: | :---: |
-| **COD10K-only Baseline** | 0.8248 | 0.1506 |
-| **Kvasir-only Baseline** | 0.2239 | 0.8950 |
-| **FL Global (FedProx)** | **0.8132** | **0.8893** |
+## 💾 Pre-trained Model Checkpoints
 
-## How to Run
+You can download the pre-trained model weights from Google Drive and place them into their respective `checkpoints/` subfolders:
 
-### 1. Installation
+| Model Name | Local Checkpoint Target Path | Description | Download Link |
+| :--- | :--- | :--- | :---: |
+| **COD10K Baseline** | `checkpoints/cod10k_checkpoints/best.pth` | Standalone COD10K baseline model | [Google Drive](https://drive.google.com/file/d/1vNe_bok-H4FSci4N9voFcf1K0r9pQQan/view?usp=sharing) |
+| **Kvasir Baseline** | `checkpoints/kvasir_checkpoints/best.pth` | Standalone Kvasir baseline model | [Google Drive](https://drive.google.com/file/d/1kt9IDZekyYZOP37HM3QPyV-y1GAd1iKt/view?usp=sharing) |
+| **Non-Augmented FL** | `checkpoints/fl_checkpoints_original/global_best.pth` | FedAvg global model (unaugmented) | [Google Drive](https://drive.google.com/file/d/1D16CNQQ-W3LZGSSwBf61LM0rnWiyoEeq/view?usp=sharing) |
+| **3x Augmented FL** | `checkpoints/fl_checkpoints_aug_new/global_best.pth` | FedAvg global model (3x augmented) | [Google Drive](https://drive.google.com/file/d/1WEzSCPq_m-6hpsM82roJS7dlJS1JbHgf/view?usp=sharing) |
 
-Install the required dependencies using the `requirements.txt` file:
+---
+
+## 🚀 Execution & Quick Start
+
+### 1. Install Dependencies
 ```bash
 pip install -r requirements.txt
 ```
 
-### 2. Standalone Training
-
-To train the single-domain baselines locally:
-- **Kvasir Baseline**:
-  ```bash
-  python kvasir_baseline_train.py
-  ```
-- **COD10K Baseline**:
-  ```bash
-  python cod10k_baseline_train.py
-  ```
-
-### 3. Federated Training
-
-To start or resume the Federated Learning process (which outputs checkpoints to `fl_checkpoints/`):
+### 2. Run Single-Image Prediction & Visualization
+To generate visual overlays (colored mask + contour outline + side-by-side heatmaps) for any image:
 ```bash
-python fed_model_train.py
+python compare/predict_single_image.py --image COD10K-v3/Test/Image/COD10K-CAM-1-Aquatic-3-Crab-46.jpg --ckpt checkpoints/fl_checkpoints_aug_new/global_best.pth
 ```
+*Outputs are saved to `results/COD10K-CAM-1-Aquatic-3-Crab-46_overlay.png` and `results/COD10K-CAM-1-Aquatic-3-Crab-46_overlay_sidebyside.png`.*
 
-### 4. Cross-Domain Evaluation
+### 3. Run Cross-Domain Evaluations
+- **Baseline Models Evaluation**:
+  ```bash
+  python compare/compare_baselines.py
+  ```
+- **Non-Augmented FL Global Model Evaluation**:
+  ```bash
+  python compare/compare_non-aug.py
+  ```
+- **3x Augmented FL Global Model Evaluation**:
+  ```bash
+  python compare/compare_fl_aug.py
+  ```
 
-To run the complete cross-domain evaluation matrix and output `cross_domain_results.json`:
-```bash
-python compare.py
-```
+---
 
-## Pretrained Weights Note
+## 📈 Experimental Results & Key Findings
 
-Model checkpoints available on request — contact via [23211a66j0@gmail.com] or raise an issue.
+### Full Comparison Table
 
-## Project Status
+| Model | Training Setting | COD10K Test (Dice ↑) | COD10K Test (IoU ↑) | Kvasir Test (Dice ↑) | Kvasir Test (IoU ↑) |
+| :--- | :--- | :---: | :---: | :---: | :---: |
+| **COD10K-Only** | Standalone Baseline | **0.8248** | **0.3281** | *0.1541* *(collapse)* | *0.1228* |
+| **Kvasir-Only** | Standalone Baseline | *0.2239* *(collapse)* | *0.1347* | **0.9665** | **0.9362** |
+| **FL Global** | Non-Augmented FL | 0.7853 | 0.3373 | 0.8738 | 0.8072 |
+| **FL Global (3x Aug)** | **Augmented FL** | **0.7987** | **0.3348** | **0.9184** | **0.8649** |
 
-**Ongoing** (actively improving Kvasir-SEG results via augmentation).
+---
+
+### 🔬 Why These Results Are Research-Worthy
+
+1. **Catastrophic Cross-Domain Failure in Single-Domain Baselines**:
+   - The COD10K-only baseline collapses from **0.8248** down to **0.1541 Dice** when evaluated on endoscopic polyp images.
+   - The Kvasir-only baseline collapses from **0.9665** down to **0.2239 Dice** when evaluated on natural camouflaged object images.
+   - *Takeaway*: High in-domain performance provides zero guarantee of out-of-domain reliability.
+
+2. **Federated Learning Solves Domain Collapse Without Sharing Data**:
+   - The **Augmented FL Global Model** achieves **0.7987 Dice** on COD10K and **0.9184 Dice** on Kvasir.
+   - Gains over baseline cross-domain failure:
+     - On Kvasir domain: **+0.7643 Dice boost** (0.1541 ➔ 0.9184)
+     - On COD10K domain: **+0.5748 Dice boost** (0.2239 ➔ 0.7987)
+
+3. **Data Augmentation Bridging Non-IID Skew**:
+   - Expanding Client 2's dataset using medically realistic augmentations improved Kvasir test performance within FL from **0.8738 to 0.9184 Dice** (+4.46%) and COD10K test performance from **0.7853 to 0.7987 Dice** (+1.34%).
+
+---
+
+## 📝 Training Execution Note
+
+Due to intensive GPU compute requirements (multi-hour training across baseline models and 50 communication rounds of federated training), training runs were executed across multiple Google Colab free-tier T4 GPU sessions over multiple days and accounts. All checkpoints, splits, and training scripts were subsequently validated, structured, and modularized into this repository.
+
+---
+
+## 📜 License
+
+This project is licensed under the MIT License - see the [LICENSE](LICENSE) file for details.

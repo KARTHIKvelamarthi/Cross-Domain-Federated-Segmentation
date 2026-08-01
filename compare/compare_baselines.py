@@ -1,38 +1,27 @@
 """
-Cross-Domain Evaluation — Full Comparison Matrix
-=================================================
-Evaluates all model combinations across both domains.
+Cross-Domain Baseline Evaluation
+=================================
+Evaluates single-domain baseline models (COD10K-only and Kvasir-only)
+live from disk across both in-domain and cross-domain test sets.
 
 Matrix:
                     COD10K Test     Kvasir Test
   COD10K-only       ✓ (in-domain)   ✓ (cross-domain)
   Kvasir-only       ✓ (cross-domain)✓ (in-domain)
-  FL Global         ✓               ✓
-
-This gives you the complete results table for the paper.
 
 CHECKPOINTS NEEDED:
-  cod10k_checkpoints/best.pth
-  kvasir_checkpoints/best.pth
-  fl_checkpoints/global_best.pth
+  checkpoints/cod10k_checkpoints/best.pth
+  checkpoints/kvasir_checkpoints/best.pth
 
 DATASETS NEEDED:
   COD10K-v3/Test/Image/
   COD10K-v3/Test/GT_Object/
-  kvasir-seg/images/   ← full dataset used as test here
-  kvasir-seg/masks/
-
-SETUP (run once):
-  import zipfile, os
-  if not os.path.exists("COD10K-v3"):
-      with zipfile.ZipFile("COD10K-v3.zip") as z:
-          z.extractall(".")
-  if not os.path.exists("kvasir-seg"):
-      with zipfile.ZipFile("kvasir-seg.zip") as z:
-          z.extractall("kvasir-seg")
+  Kvasir-SEG/images/
+  Kvasir-SEG/masks/
+  checkpoints/fl_checkpoints_original/kvasir_split_original.json
 
 USAGE:
-  !python evaluate_cross_domain.py
+  python compare/compare_baselines.py
 """
 
 import os
@@ -49,20 +38,20 @@ import timm
 # ─────────────────────────────────────────────────────
 # CONFIG
 # ─────────────────────────────────────────────────────
-COD_TEST_IMAGE_DIR = "COD10K-v3/Test/Image"
-COD_TEST_MASK_DIR  = "COD10K-v3/Test/GT_Object"
+PROJECT_ROOT       = Path(__file__).resolve().parent.parent
 
-# For Kvasir we use the held-out val split (last 100 images)
-# same split used during polyp baseline training
-KVASIR_IMAGE_DIR   = "Kvasir-SEG/images"
-KVASIR_MASK_DIR    = "Kvasir-SEG/masks"
-KVASIR_VAL_SPLIT   = 0.1   # must match train_polyp_baseline.py
+COD_TEST_IMAGE_DIR = str(PROJECT_ROOT / "COD10K-v3" / "Test" / "Image")
+COD_TEST_MASK_DIR  = str(PROJECT_ROOT / "COD10K-v3" / "Test" / "GT_Object")
 
-BASELINE_COD_CKPT  = "cod10k_checkpoints/best.pth"
-BASELINE_KV_CKPT   = "kvasir_checkpoints/best.pth"
-FL_CKPT            = "fl_checkpoints/global_best.pth"
+KVASIR_IMAGE_DIR   = str(PROJECT_ROOT / "Kvasir-SEG" / "images")
+KVASIR_MASK_DIR    = str(PROJECT_ROOT / "Kvasir-SEG" / "masks")
+KVASIR_VAL_SPLIT   = 0.1
 
-RESULTS_PATH       = "cross_domain_results.json"
+BASELINE_COD_CKPT  = str(PROJECT_ROOT / "checkpoints" / "cod10k_checkpoints" / "best.pth")
+BASELINE_KV_CKPT   = str(PROJECT_ROOT / "checkpoints" / "kvasir_checkpoints" / "best.pth")
+
+KV_SPLIT_FILE      = str(PROJECT_ROOT / "checkpoints" / "fl_checkpoints_original" / "kvasir_split_original.json")
+RESULTS_PATH       = str(PROJECT_ROOT / "results" / "baseline_results.json")
 
 IMAGE_SIZE  = 352
 BATCH_SIZE  = 4
@@ -86,7 +75,6 @@ def normalize(img: np.ndarray) -> np.ndarray:
 
 
 class SegDataset(Dataset):
-    """Generic segmentation dataset — works for both COD10K and Kvasir."""
     def __init__(self, records: list):
         self.records = records
 
@@ -116,6 +104,14 @@ class SegDataset(Dataset):
             return dummy, dm, "error"
 
 
+def find_mask_path(mask_dir: str, stem: str) -> str:
+    for ext in [".jpg", ".png"]:
+        p = os.path.join(mask_dir, stem + ext)
+        if os.path.exists(p):
+            return p
+    return os.path.join(mask_dir, stem + ".jpg")
+
+
 def build_cod_test_records() -> list:
     records = []
     for fname in sorted(os.listdir(COD_TEST_IMAGE_DIR)):
@@ -132,33 +128,39 @@ def build_cod_test_records() -> list:
     return records
 
 
-def find_mask_path(mask_dir: str, stem: str) -> str:
-    for ext in [".jpg", ".png"]:
-        p = os.path.join(mask_dir, stem + ext)
-        if os.path.exists(p):
-            return p
-    return os.path.join(mask_dir, stem + ".jpg")
-
-
-def build_kvasir_val_records() -> list:
-    """
-    Use the same val split as training — last VAL_SPLIT of sorted images.
-    This ensures no data leakage from the Kvasir baseline training.
-    """
-    all_records = []
-    supported = {".jpg", ".jpeg", ".png"}
-    for fname in sorted(os.listdir(KVASIR_IMAGE_DIR)):
-        if Path(fname).suffix.lower() not in supported:
-            continue
-        stem = Path(fname).stem
-        all_records.append({
-            "img":  os.path.join(KVASIR_IMAGE_DIR, fname),
-            "mask": find_mask_path(KVASIR_MASK_DIR, stem),
-            "name": stem,
-        })
-
-    val_n = max(1, int(len(all_records) * KVASIR_VAL_SPLIT))
-    return all_records[-val_n:]   # same split as training
+def build_kvasir_test_records() -> list:
+    split_file = KV_SPLIT_FILE if os.path.exists(KV_SPLIT_FILE) else str(PROJECT_ROOT / "checkpoints" / "kvasir_checkpoints" / "kvasir_split_original.json")
+    if os.path.exists(split_file):
+        with open(split_file) as f:
+            split = json.load(f)
+        test_stems = set(split["test"])
+        records = []
+        supported = {".jpg", ".jpeg", ".png"}
+        for fname in sorted(os.listdir(KVASIR_IMAGE_DIR)):
+            if Path(fname).suffix.lower() not in supported:
+                continue
+            stem = Path(fname).stem
+            if stem in test_stems:
+                records.append({
+                    "img":  os.path.join(KVASIR_IMAGE_DIR, fname),
+                    "mask": find_mask_path(KVASIR_MASK_DIR, stem),
+                    "name": stem,
+                })
+        return records
+    else:
+        all_records = []
+        supported = {".jpg", ".jpeg", ".png"}
+        for fname in sorted(os.listdir(KVASIR_IMAGE_DIR)):
+            if Path(fname).suffix.lower() not in supported:
+                continue
+            stem = Path(fname).stem
+            all_records.append({
+                "img":  os.path.join(KVASIR_IMAGE_DIR, fname),
+                "mask": find_mask_path(KVASIR_MASK_DIR, stem),
+                "name": stem,
+            })
+        val_n = max(1, int(len(all_records) * KVASIR_VAL_SPLIT))
+        return all_records[-val_n:]
 
 
 def get_loader(records: list) -> DataLoader:
@@ -245,8 +247,7 @@ def load_model(ckpt_path: str, label: str) -> nn.Module:
     ckpt  = torch.load(ckpt_path, map_location=DEVICE, weights_only=False)
     model.load_state_dict(ckpt["model_state"])
     model.eval()
-    epoch_or_round = ckpt.get("epoch") or ckpt.get("round", "?")
-    print(f"  Loaded {label} (epoch/round {epoch_or_round})")
+    print(f"  Loaded {label} ({os.path.basename(ckpt_path)})")
     return model
 
 
@@ -260,7 +261,6 @@ def compute_dice(pred_bin: torch.Tensor, gt: torch.Tensor, eps=1e-6) -> float:
     return ((2 * inter + eps) / (union + eps)).mean().item()
 
 def compute_iou(pred_prob: torch.Tensor, gt: torch.Tensor, eps=1e-6) -> float:
-    """Soft IoU — stable for both sparse (COD) and dense (polyp) masks."""
     inter = (pred_prob * gt).sum(dim=(2, 3))
     union = (pred_prob + gt - pred_prob * gt).sum(dim=(2, 3))
     return ((inter + eps) / (union + eps)).mean().item()
@@ -295,20 +295,12 @@ def compute_smeasure(pred_prob: np.ndarray, gt: np.ndarray,
     return alpha * Q_o + (1 - alpha) * (w_o * Q_o + w_b * Q_b)
 
 
-# ─────────────────────────────────────────────────────
-# EVALUATE ONE MODEL ON ONE DATASET
-# ─────────────────────────────────────────────────────
-
 @torch.no_grad()
 def evaluate(model: nn.Module, loader: DataLoader,
              model_label: str, domain_label: str) -> dict:
     model.eval()
 
-    all_dice = []
-    all_iou  = []
-    all_mae  = []
-    all_fm   = []
-    all_sm   = []
+    all_dice, all_iou, all_mae, all_fm, all_sm = [], [], [], [], []
 
     for img, mask, _ in loader:
         img  = img.to(DEVICE)
@@ -339,23 +331,11 @@ def evaluate(model: nn.Module, loader: DataLoader,
     }
 
 
-# ─────────────────────────────────────────────────────
-# PRINT RESULTS TABLE
-# ─────────────────────────────────────────────────────
-
 def print_results_table(all_results: dict):
-    """
-    Prints the full cross-domain results table exactly as it
-    would appear in the paper.
-
-    Rows    : COD10K-only | Kvasir-only | FL Global
-    Columns : COD10K Test | Kvasir Test
-    """
-    metrics = ["Dice", "IoU", "F-measure", "S-measure", "MAE"]
-    models  = ["COD10K-only", "Kvasir-only", "FL Global"]
+    models = ["COD10K-only", "Kvasir-only"]
 
     print(f"\n{'='*80}")
-    print(f"  CROSS-DOMAIN EVALUATION — FULL RESULTS TABLE")
+    print(f"  BASELINE CROSS-DOMAIN EVALUATION — RESULTS TABLE")
     print(f"{'='*80}")
     print(f"\n  {'Model':<16} {'COD10K Test':^30} {'Kvasir Test':^30}")
     print(f"  {'':16} {'Dice':>6} {'IoU':>6} {'Fm':>6} {'Sm':>6} {'MAE':>6}  "
@@ -376,57 +356,17 @@ def print_results_table(all_results: dict):
               f"{fmt(kv_r,'F-measure')} {fmt(kv_r,'S-measure')} {fmt(kv_r,'MAE')}")
 
     print(f"  {'-'*76}")
-    print(f"{'='*80}")
+    print(f"{'='*80}\n")
 
-    # Key insight printout
-    print(f"\n  KEY FINDINGS:")
-
-    cod_base_cod  = all_results.get("COD10K-only_COD10K", {}).get("Dice", 0)
-    cod_base_kv   = all_results.get("COD10K-only_Kvasir", {}).get("Dice", 0)
-    kv_base_cod   = all_results.get("Kvasir-only_COD10K", {}).get("Dice", 0)
-    kv_base_kv    = all_results.get("Kvasir-only_Kvasir", {}).get("Dice", 0)
-    fl_cod        = all_results.get("FL Global_COD10K", {}).get("Dice", 0)
-    fl_kv         = all_results.get("FL Global_Kvasir", {}).get("Dice", 0)
-
-    print(f"\n  Cross-domain failure of single-domain models:")
-    print(f"    COD10K-only on Kvasir  : Dice = {cod_base_kv:.4f}  "
-          f"(vs FL: {fl_kv:.4f}, gain = +{fl_kv - cod_base_kv:.4f})")
-    print(f"    Kvasir-only on COD10K  : Dice = {kv_base_cod:.4f}  "
-          f"(vs FL: {fl_cod:.4f}, gain = +{fl_cod - kv_base_cod:.4f})")
-
-    print(f"\n  FL trade-off on in-domain performance:")
-    print(f"    COD10K domain  : FL ({fl_cod:.4f}) vs Baseline ({cod_base_cod:.4f})  "
-          f"drop = {fl_cod - cod_base_cod:.4f}")
-    print(f"    Kvasir domain  : FL ({fl_kv:.4f}) vs Baseline ({kv_base_kv:.4f})  "
-          f"drop = {fl_kv - kv_base_kv:.4f}")
-
-    print(f"\n  PAPER ARGUMENT:")
-    if cod_base_kv < 0.5 and kv_base_cod < 0.5:
-        print(f"  ✓ Strong — single-domain models fail catastrophically cross-domain.")
-        print(f"    FL global model handles both domains with minimal trade-off.")
-    elif cod_base_kv < 0.6 or kv_base_cod < 0.6:
-        print(f"  ✓ Good — single-domain models struggle significantly cross-domain.")
-        print(f"    FL global model provides meaningful cross-domain generalisation.")
-    else:
-        print(f"  ~ Moderate — domains may be less heterogeneous than expected.")
-        print(f"    Emphasise the unified deployment advantage in the paper.")
-    print()
-
-
-# ─────────────────────────────────────────────────────
-# MAIN
-# ─────────────────────────────────────────────────────
 
 def main():
-    # Verify all paths exist
     required = [
         (COD_TEST_IMAGE_DIR, "COD10K Test Images"),
         (COD_TEST_MASK_DIR,  "COD10K Test Masks"),
         (KVASIR_IMAGE_DIR,   "Kvasir Images"),
         (KVASIR_MASK_DIR,    "Kvasir Masks"),
-        (BASELINE_COD_CKPT,  "COD10K Baseline checkpoint"),
-        (BASELINE_KV_CKPT,   "Kvasir Baseline checkpoint"),
-        (FL_CKPT,            "FL Global checkpoint"),
+        (BASELINE_COD_CKPT,  "COD10K Baseline Checkpoint"),
+        (BASELINE_KV_CKPT,   "Kvasir Baseline Checkpoint"),
     ]
     for path, label in required:
         if not os.path.exists(path):
@@ -434,34 +374,28 @@ def main():
             return
 
     print(f"\n{'='*80}")
-    print(f"  Cross-Domain Evaluation — COD10K + Kvasir-SEG")
+    print(f"  Baseline Cross-Domain Evaluation — Live Checkpoints")
     print(f"{'='*80}\n")
 
-    # Build datasets
     cod_records = build_cod_test_records()
-    kv_records  = build_kvasir_val_records()
+    kv_records  = build_kvasir_test_records()
     print(f"COD10K test images : {len(cod_records)}")
-    print(f"Kvasir val images  : {len(kv_records)}")
+    print(f"Kvasir test images : {len(kv_records)}")
 
     cod_loader = get_loader(cod_records)
     kv_loader  = get_loader(kv_records)
 
-    # Load all three models
-    print(f"\nLoading models...")
+    print(f"\nLoading baseline models...")
     cod_model = load_model(BASELINE_COD_CKPT, "COD10K-only baseline")
     kv_model  = load_model(BASELINE_KV_CKPT,  "Kvasir-only baseline")
-    fl_model  = load_model(FL_CKPT,           "FL Global")
 
     all_results = {}
 
-    # ── 6 evaluations ──────────────────────────────────
     combos = [
         (cod_model, cod_loader, "COD10K-only", "COD10K"),   # in-domain
-        (cod_model, kv_loader,  "COD10K-only", "Kvasir"),   # cross-domain ← key
-        (kv_model,  cod_loader, "Kvasir-only", "COD10K"),   # cross-domain ← key
+        (cod_model, kv_loader,  "COD10K-only", "Kvasir"),   # cross-domain
+        (kv_model,  cod_loader, "Kvasir-only", "COD10K"),   # cross-domain
         (kv_model,  kv_loader,  "Kvasir-only", "Kvasir"),   # in-domain
-        (fl_model,  cod_loader, "FL Global",   "COD10K"),   # FL on COD
-        (fl_model,  kv_loader,  "FL Global",   "Kvasir"),   # FL on Kvasir
     ]
 
     for model, loader, model_label, domain_label in combos:
@@ -473,14 +407,12 @@ def main():
               f"Fm={result['F-measure']:.4f}  Sm={result['S-measure']:.4f}  "
               f"MAE={result['MAE']:.4f}")
 
-    # Print full table
     print_results_table(all_results)
 
-    # Save to Drive
     os.makedirs(os.path.dirname(RESULTS_PATH), exist_ok=True)
     with open(RESULTS_PATH, "w") as f:
         json.dump(all_results, f, indent=2)
-    print(f"  Results saved to: {RESULTS_PATH}\n")
+    print(f"  Baseline results saved to: {RESULTS_PATH}\n")
 
 
 if __name__ == "__main__":
