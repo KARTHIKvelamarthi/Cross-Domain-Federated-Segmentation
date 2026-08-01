@@ -31,11 +31,11 @@ Standard deep learning segmentation models perform exceptionally well within the
   $$\mathcal{L}_{\text{total}} = \mathcal{L}_{\text{BCE+IoU}}(\hat{Y}_{\text{seg}}, Y_{\text{seg}}) + 0.5 \cdot \mathcal{L}_{\text{BCE+IoU}}(\hat{Y}_{\text{edge}}, Y_{\text{edge}})$$
 
 ### 📊 Datasets & Client Nodes
-| Client | Domain | Dataset | Training Size | Test Size | Characteristics |
-| :--- | :--- | :--- | :--- | :--- | :--- |
-| **Client 1** | Natural / Camouflaged | **COD10K-v3** | 4,000 images | 2,026 images | High intra-class variation, subtle visual boundaries |
-| **Client 2** | Medical / Endoscopy | **Kvasir-SEG** | 800 images | 100 images | High specular reflections, variable mucosal backgrounds |
-| **Client 2 (Aug)** | Medical / Endoscopy | **Kvasir-SEG-aug** | 2,400 images | 100 images | Expanded via Horizontal Flip, Random Rotation (±20°), Color Jitter |
+| Client | Domain | Dataset | Training Size | Validation Size | Test Size | Characteristics |
+| :--- | :--- | :--- | :--- | :--- | :--- | :--- |
+| **Client 1** | Natural / Camouflaged | **COD10K-v3** | ~5,400 images | ~600 images | 4,000 images | High intra-class variation, subtle visual boundaries |
+| **Client 2** | Medical / Endoscopy | **Kvasir-SEG** | 800 images | 100 images | 100 images | High specular reflections, variable mucosal backgrounds |
+| **Client 2 (Aug)** | Medical / Endoscopy | **Kvasir-SEG-aug** | 3,200 images | 400 images | 100 images | Expanded via Horizontal Flip, Random Rotation (±20°), Color Jitter |
 
 ---
 
@@ -44,11 +44,11 @@ Standard deep learning segmentation models perform exceptionally well within the
 ```mermaid
 flowchart TD
     subgraph Client1 ["Client 1: Natural Domain (COD10K)"]
-        D1["COD10K Dataset<br/>(4,000 Train Images)"] --> M1["Local Model 1<br/>(PVTv2-B2 + Decoder)"]
+        D1["COD10K Dataset<br/>(~5,400 Train Images)"] --> M1["Local Model 1<br/>(PVTv2-B2 + Decoder)"]
     end
 
     subgraph Client2 ["Client 2: Medical Domain (Kvasir-SEG)"]
-        D2["Kvasir-SEG Dataset<br/>(3x Medically Augmented)"] --> M2["Local Model 2<br/>(PVTv2-B2 + Decoder)"]
+        D2["Kvasir-SEG Dataset<br/>(4x Expanded Augmented)"] --> M2["Local Model 2<br/>(PVTv2-B2 + Decoder)"]
     end
 
     M1 -- "Send Local Weights (W₁)" --> Server["FedAvg / FedProx Aggregator<br/>W_global = Σ (w_k * W_k)"]
@@ -58,7 +58,7 @@ flowchart TD
     Server -- "Broadcast Global Weights (W_global)" --> M2
 
     Server --> Eval["Cross-Domain Evaluator"]
-    Eval --> T1["COD10K Test Set<br/>(2,026 images)"]
+    Eval --> T1["COD10K Test Set<br/>(4,000 images)"]
     Eval --> T2["Kvasir Reserved Test Set<br/>(100 original stems)"]
 ```
 
@@ -150,8 +150,8 @@ You can download the pre-trained model weights from Google Drive and place them 
 | :--- | :--- | :--- | :---: |
 | **COD10K Baseline** | `checkpoints/cod10k_checkpoints/best.pth` | Standalone COD10K baseline model | [Google Drive](https://drive.google.com/file/d/1vNe_bok-H4FSci4N9voFcf1K0r9pQQan/view?usp=sharing) |
 | **Kvasir Baseline** | `checkpoints/kvasir_checkpoints/best.pth` | Standalone Kvasir baseline model | [Google Drive](https://drive.google.com/file/d/1kt9IDZekyYZOP37HM3QPyV-y1GAd1iKt/view?usp=sharing) |
-| **Non-Augmented FL** | `checkpoints/fl_checkpoints_original/global_best.pth` | FedAvg global model (unaugmented) | [Google Drive](https://drive.google.com/file/d/1D16CNQQ-W3LZGSSwBf61LM0rnWiyoEeq/view?usp=sharing) |
-| **3x Augmented FL** | `checkpoints/fl_checkpoints_aug_new/global_best.pth` | FedAvg global model (3x augmented) | [Google Drive](https://drive.google.com/file/d/1WEzSCPq_m-6hpsM82roJS7dlJS1JbHgf/view?usp=sharing) |
+| **Non-Augmented FL** | `checkpoints/fl_checkpoints_original/global_best.pth` | FedProx global model (unaugmented) | [Google Drive](https://drive.google.com/file/d/1D16CNQQ-W3LZGSSwBf61LM0rnWiyoEeq/view?usp=sharing) |
+| **3x Augmented FL** | `checkpoints/fl_checkpoints_aug_new/global_best.pth` | FedProx global model (3x augmented) | [Google Drive](https://drive.google.com/file/d/1WEzSCPq_m-6hpsM82roJS7dlJS1JbHgf/view?usp=sharing) |
 
 ---
 
@@ -212,7 +212,7 @@ python compare/predict_single_image.py --image COD10K-v3/Test/Image/COD10K-CAM-1
      - On COD10K domain: **+0.5748 Dice boost** (0.2239 ➔ 0.7987)
 
 3. **Data Augmentation Bridging Non-IID Skew**:
-   - Expanding Client 2's dataset using medically realistic augmentations improved Kvasir test performance within FL from **0.8738 to 0.9184 Dice** (+4.46%) and COD10K test performance from **0.7853 to 0.7987 Dice** (+1.34%).
+   - Expanding Client 2's dataset using medically realistic augmentations improved Kvasir test performance within FL from **0.8738 to 0.9184 Dice** (+4.46 percentage points) and COD10K test performance from **0.7853 to 0.7987 Dice** (+1.34 percentage points).
 
 ---
 
