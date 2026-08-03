@@ -28,7 +28,8 @@ Standard deep learning segmentation models perform exceptionally well within the
   1. *Segmentation Head*: Outputs primary binary segmentation mask logits.
   2. *Edge Head*: Supervised boundary edge detection head to enforce sharp object contours.
 - **Loss Function**: Combined Binary Cross-Entropy (BCE) + Intersection-over-Union (IoU) Loss with auxiliary boundary loss:
-  $$\mathcal{L}_{\text{total}} = \mathcal{L}_{\text{BCE+IoU}}(\hat{Y}_{\text{seg}}, Y_{\text{seg}}) + 0.5 \cdot \mathcal{L}_{\text{BCE+IoU}}(\hat{Y}_{\text{edge}}, Y_{\text{edge}})$$
+
+$$\mathcal{L}_{\text{total}} = \mathcal{L}_{\text{BCE+IoU}}(\hat{Y}_{\text{seg}}, Y_{\text{seg}}) + 0.5 \cdot \mathcal{L}_{\text{BCE+IoU}}(\hat{Y}_{\text{edge}}, Y_{\text{edge}})$$
 
 ### 📊 Datasets & Client Nodes
 | Client | Domain | Dataset | Training Size | Validation Size | Test Size | Characteristics |
@@ -167,9 +168,8 @@ pip install -r requirements.txt
 ### 2. Run Single-Image Prediction & Visualization
 To generate visual overlays (colored mask + contour outline + side-by-side heatmaps) for any image:
 ```bash
-python compare/predict_single_image.py --image COD10K-v3/Test/Image/COD10K-CAM-1-Aquatic-3-Crab-46.jpg --ckpt checkpoints/fl_checkpoints_aug_new/global_best.pth
+python compare/predict_single_image.py --image path/to/image.jpg --ckpt checkpoints/fl_checkpoints_aug_new/global_best.pth
 ```
-*Outputs are saved to `results/COD10K-CAM-1-Aquatic-3-Crab-46_overlay.png` and `results/COD10K-CAM-1-Aquatic-3-Crab-46_overlay_sidebyside.png`.*
 
 ### 3. Run Cross-Domain Evaluations
 - **Baseline Models Evaluation**:
